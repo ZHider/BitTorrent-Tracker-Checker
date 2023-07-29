@@ -3,14 +3,70 @@ import asyncio
 from asyncio import Semaphore
 from typing import Awaitable, Iterable, Optional, Set, Tuple
 
-from alive_progress import alive_bar
-
 # 总尝试时间 = TIMEOUT × RETRY_TIMES
 TIMEOUT = 5
 RETRY_TIMES = 3
+# 协程数量
 SEMAPHORE_THREADHOLD = 32
-ALLOW_HTTP_STATUS_CODE = (200, 403) # 判定为成功的状态码
-TRACKER_URLS_FILE = r"D:\url.txt"
+# 判定为成功的 HTTP 状态码
+ALLOW_HTTP_STATUS_CODE = (200, 403)
+# 读入 URL 模式，可选 pipe 和 file
+TRACKER_INPUT_METHOD = "PIPE"
+TRACKER_URLS_FILE = r"./urls.txt"
+
+
+class CompatibleAliveProgress:
+    
+    def try_import(self):
+        """尝试导入 alive_progress.alive_bar
+
+        Returns:
+            导入的 module
+        """
+        
+        try:
+            import importlib
+            alive_bar = importlib.import_module("alive_progress").alive_bar
+            
+            return alive_bar
+        
+        except ImportError:
+            return None
+    
+
+    def __init__(self, *args, **kwargs):
+        
+        def init_context_manager():
+            self.manager = self.alive_bar(*args, **kwargs)
+            self.enter = type(self.manager).__enter__
+            self.exit = type(self.manager).__exit__
+        
+        
+        self.alive_bar = self.try_import()
+        
+        if self.alive_bar:
+            init_context_manager()
+        
+        self.bar = None
+
+
+    def __enter__(self):
+        if self.alive_bar:
+            self.bar = self.enter(self.manager)
+            return self.bar
+        
+        else:
+            def func_pass(*args, **kwargs):
+                pass
+            return func_pass
+
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.alive_bar:
+            self.exit(self.manager, exc_type, exc_val, exc_tb)
+
+
+alive_bar = CompatibleAliveProgress
 
 
 def retry(func: Awaitable):
@@ -33,6 +89,9 @@ def retry(func: Awaitable):
                 return None
             else:
                 # 否则将结果加入结果列表，继续循环
+                if isinstance(_result, RuntimeError):
+                    # raise RuntimeError 方便 Debug
+                    raise _result
                 _result_list.append(_result)
         
         return _result_list
@@ -152,10 +211,8 @@ async def check_http_tracker_url(url) -> Optional[Exception]:
     try:
         # 发送一个get请求到指定的url，并传递参数字典
         status_code = (
-            await asyncio.wait_for(
-                my_client_session.get(url, params=params, timeout=TIMEOUT),
-                timeout=TIMEOUT + 5)
-            ).status
+            await my_client_session.get(url, params=params, timeout=TIMEOUT)
+        ).status
         # 检查响应状态码是否为200，表示成功
         if status_code not in ALLOW_HTTP_STATUS_CODE:
             _result = Exception(f"status code: {status_code}")
@@ -169,28 +226,44 @@ async def check_http_tracker_url(url) -> Optional[Exception]:
         return _result
 
 
-def read_urls_from_pipe():
+def read_urls_from_pipe(method: str):
+    """读入 URL 数据
+
+    Arguments:
+        method -- 可选值：PIPE | FILE
+            PIPE: 从 stdin 读入 url list
+            FILE: 从 TRACKER_URLS_FILE 路径读入纯文本文件
+
+    Returns:
+        url 列表
+    """
     
     urls = list()
+    stream = list()
     
-    import fileinput
-    with fileinput.input() as f_input:
-        for line in f_input:
-            urls.append(line.strip()) if line.strip() else "pass"
-    if len(urls) > 1:
-        return urls
-    
-    with open(TRACKER_URLS_FILE, 'r') as f:
-        for line in f:
-            urls.append(line.strip()) if line.strip() else "pass"
-    if len(urls) > 1:
-        return urls
-    
-    raise Exception("No tracker url loaded!")
+    match method.lower():
+        case "pipe":
+            import fileinput
+            stream = fileinput.input()
 
+        case "file":
+            stream = open(TRACKER_URLS_FILE, 'r')
+
+        case _:
+            raise ValueError("Not supported input method!")
+
+    for line in stream:
+        urls.append(line.strip()) if line.strip() else "pass"
+    
+    stream.close()
+    
+    if len(urls) > 1:
+        return urls
+    else:
+        raise Exception("No tracker url loaded!")
 
 sem = Semaphore(SEMAPHORE_THREADHOLD)
-tracker_urls = read_urls_from_pipe()
+tracker_urls = read_urls_from_pipe(TRACKER_INPUT_METHOD)
 
 async def check_tracker_url(tracker_url, bar) -> Optional[Exception]:
     """遍历tracker URL列表，根据URL的协议类型，调用相应的检测函数
