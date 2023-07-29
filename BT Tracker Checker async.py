@@ -1,17 +1,47 @@
 #!/usr/bin/env python3
 import asyncio
 from asyncio import Semaphore
-from typing import Optional, Tuple
+from typing import Awaitable, Iterable, Optional, Set, Tuple
 
 from alive_progress import alive_bar
 
+# 总尝试时间 = TIMEOUT × RETRY_TIMES
 TIMEOUT = 5
+RETRY_TIMES = 3
 SEMAPHORE_THREADHOLD = 32
-ALLOW_HTTP_STATUS_CODE = (200, 403) # 作为成功的状态码
+ALLOW_HTTP_STATUS_CODE = (200, 403) # 判定为成功的状态码
 TRACKER_URLS_FILE = r"D:\url.txt"
 
 
-async def check_udp_tracker_url(url: str) -> Optional[str]:
+def retry(func: Awaitable):
+    """让函数重试 RETRY_TIMES 次。
+    函数返回 None 则直接返回 None；
+    若返回结果则将结果加入 list 中，最后返回该 list
+
+    Arguments:
+        func -- _description_
+    """
+    
+    async def _wrapper(*args, **kwargs) -> Optional[Set]:
+        _result_list = list()
+        
+        for i in range(RETRY_TIMES):
+            _result = await func(*args, **kwargs)
+            
+            if _result is None:
+                # 其中有一次成功则立刻跳出循环
+                return None
+            else:
+                # 否则将结果加入结果列表，继续循环
+                _result_list.append(_result)
+        
+        return _result_list
+    
+    return _wrapper
+
+
+@retry
+async def check_udp_tracker_url(url: str) -> Optional[Exception]:
     import random
     import struct
     from urllib.parse import urlsplit
@@ -60,7 +90,7 @@ async def check_udp_tracker_url(url: str) -> Optional[str]:
         """尝试链接一个tracker
 
         Returns:
-            成功返回 None，否则返回错误信息
+            成功返回 None，否则返回 Exception
         """
         _result = None
         
@@ -90,10 +120,15 @@ async def check_udp_tracker_url(url: str) -> Optional[str]:
             return _result
     
     return await send_connect(transaction_id, connection_id)
-   
 
-# 定义一个函数，用于检测HTTP tracker URL是否可用
+
+@retry
 async def check_http_tracker_url(url) -> Optional[Exception]:
+    """检测HTTP tracker URL是否可用
+
+    Returns:
+        成功返回 None，否则返回 Exception
+    """
     
     def init_client_session():
         import aiohttp
@@ -172,7 +207,7 @@ async def check_tracker_url(tracker_url, bar) -> Optional[Exception]:
         elif tracker_url.startswith("http://") or tracker_url.startswith("https://"):
             _result = await check_http_tracker_url(tracker_url)
         else:
-            _result = "not a valid tracker URL."
+            _result = ValueError("Scheme not supported.")
         
         print(f"Success! {tracker_url}" if _result is None
             else f"{tracker_url}: {_result}")
@@ -183,10 +218,19 @@ async def check_tracker_url(tracker_url, bar) -> Optional[Exception]:
 
 async def main():
     
+    def Exception_list_to_str_set(it: Optional[Iterable]):
+        return set(map(
+            lambda item : repr(item),
+            it
+        )) if isinstance(it, Iterable) else it
+    
+    
     with alive_bar(len(tracker_urls)) as bar:
         tasks = [asyncio.create_task(check_tracker_url(tracker_url, bar))
                  for tracker_url in tracker_urls]
         result_list = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    result_list = map(Exception_list_to_str_set, result_list)
     
     return result_list
     
